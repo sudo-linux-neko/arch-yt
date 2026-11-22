@@ -1,0 +1,50 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Vaibhav Agarwal
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "plainbagel-archiver"
+version = "1.0.0"
+description = "Resumable preservation archiver for The Plain Bagel YouTube channel"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "internetarchive>=5.12,<6",
+  "requests>=2.31,<3",
+  "tomli>=2; python_version < '3.11'",
+  "yt-dlp>=2026.7.4",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.9",
+]
+
+[project.scripts]
+plainbagel-archive = "plainbagel_archiver.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["plainbagel_archiver*"]
+
+[tool.pytest.ini_options]
+addopts = "-ra"
+testpaths = ["tests"]
+markers = [
+  "network: tests that access the internet",
+  "ffmpeg: tests that require ffmpeg",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "C4", "PIE", "RUF"]
+ignore = ["E501"]
+
+[tool.ruff.format]
+quote-style = "double"

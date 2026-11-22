@@ -1,0 +1,36 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// Copyright (C) 2026 Vaibhav Agarwal
+
+channel_url = "https://www.youtube.com/@ThePlainBagel"
+channel_id = "UCFCEuCsyWP0YkP3CZ3Mr01Q"
+channel_name = "The Plain Bagel"
+creator_name = "Richard Coffin"
+creator_email = "richard@theplainbagel.com"
+archiver_email = "nekomeowpurr@proton.me"
+archiver_name = "vaibhav"
+
+tabs = ["videos", "shorts", "streams"]
+collection = "opensource_movies"
+identifier_prefix = "theplainbagel"
+work_dir = "./work"
+cookies_file = ""
+
+permission_acknowledged = true
+cleanup_after_upload = true
+max_attempts = 4
+session_minutes = 600
+min_free_gb = 12.0
+
+ytdlp_extractor_args = "youtube:player_client=tv_simply,android_vr,web_safari"
+
+ytdlp_retries = 10
+fragment_retries = 10
+socket_timeout = 30
+concurrent_fragments = 4
+subtitle_languages = "en.*"
+
+upload_retries = 8
+upload_retries_sleep = 30
+upload_timeout_seconds = 1800
+verify_timeout_seconds = 600
+verify_poll_seconds = 20

@@ -1,0 +1,333 @@
+import glob
+import os
+import pathlib
+import shutil
+import sqlite3
+import subprocess
+import sys
+import zipfile
+
+# Cell knobs (all optional):
+#   PB_LIMIT           number of videos to process this session, e.g. "10"
+#                      OR "all" / empty to let defaults decide
+#   PB_CLIENTS         override yt-dlp clients, e.g.
+#                      "youtube:player_client=tv_simply,android_vr,web_safari"
+#   PB_SESSION_MINUTES session budget in minutes (default 660 = 11h of the 12h cap)
+#   LITERAL_IA_*       only used when Kaggle Secrets are missing
+LITERAL_IA_ACCESS_KEY = ""
+LITERAL_IA_SECRET_KEY = ""
+
+PROJECT = pathlib.Path("/kaggle/working/arch-yt")
+WORK = pathlib.Path("/kaggle/working/plainbagel-work")
+STATE_DB = WORK / "state" / "archive.sqlite3"
+
+
+def banner(text):
+    print()
+    print("=" * 70)
+    print(text)
+    print("=" * 70)
+
+
+def step_ok(name, extra=""):
+    suffix = f" ({extra})" if extra else ""
+    print(f"[OK  ] {name}{suffix}")
+
+
+def step_fail(name, detail):
+    print(f"[FAIL] {name}: {detail}")
+
+
+def show_state(label):
+    if not STATE_DB.exists():
+        return f"no state yet: {label}"
+    try:
+        con = sqlite3.connect(STATE_DB)
+        rows = con.execute("select status, count(*) from videos group by status").fetchall()
+        con.close()
+    except sqlite3.Error as exc:
+        print("could not read state db:", exc)
+        return f"unreadable state: {label}"
+    if not rows:
+        return f"empty state: {label}"
+    return f"{label}: " + ", ".join(f"{status}={count}" for status, count in rows)
+
+
+banner("STEP 1/6 - locate the project zip or auto-extracted dataset")
+if (PROJECT / "pyproject.toml").exists():
+    step_ok("project already extracted", str(PROJECT))
+else:
+    zips = [
+        p
+        for p in glob.glob("/kaggle/input/**/*.zip", recursive=True)
+        + glob.glob("/kaggle/input/**/*.ZIP", recursive=True)
+        if "plainbagel" in p.lower()
+    ]
+    zips.sort(key=lambda p: ("plainbagel-archiver" not in p.lower(), p))
+    if zips:
+        zip_path = zips[0]
+        print(f"using zip: {zip_path}")
+        PROJECT.parent.mkdir(parents=True, exist_ok=True)
+        shutil.rmtree(PROJECT, ignore_errors=True)
+        with zipfile.ZipFile(zip_path) as zf:
+            zf.extractall(PROJECT)
+        step_ok("extracted to", str(PROJECT))
+    else:
+        sources = glob.glob("/kaggle/input/**/pyproject.toml", recursive=True)
+        if sources:
+            dataset_root = pathlib.Path(sources[0]).parent
+            print(f"dataset is already unzipped by Kaggle: {dataset_root}")
+            PROJECT.parent.mkdir(parents=True, exist_ok=True)
+            shutil.rmtree(PROJECT, ignore_errors=True)
+            shutil.copytree(dataset_root, PROJECT)
+            step_ok("copied dataset into", str(PROJECT))
+        else:
+            print("nothing usable was found under /kaggle/input; current contents:")
+            for path in sorted(glob.glob("/kaggle/input/*"))[:20]:
+                print("  ", path)
+            print()
+            step_fail(
+                "no project found",
+                "attach the dataset: right-hand 'Add input' panel -> search "
+                "'plainbagel-archiver' -> use it. If it is attached, upload the zip "
+                "again to https://www.kaggle.com/datasets/nekomeowfm/plainbagel-archiver",
+            )
+            raise SystemExit(1)
+
+banner("STEP 2/6 - install dependencies")
+result = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-q", "-r", str(PROJECT / "requirements.txt")],
+    check=False,
+)
+if result.returncode != 0:
+    step_fail("pip install requirements.txt", f"exit {result.returncode}")
+else:
+    step_ok("requirements installed")
+result = subprocess.run(
+    [sys.executable, "-m", "pip", "install", "-q", "-e", str(PROJECT)],
+    check=False,
+)
+if result.returncode != 0:
+    step_fail("pip install -e .", f"exit {result.returncode}; will fall back to sys.path")
+    sys.path.insert(0, str(PROJECT))
+else:
+    step_ok("plainbagel-archiver installed editable")
+
+banner("STEP 3/6 - ffmpeg")
+if shutil.which("ffmpeg"):
+    step_ok("ffmpeg already present", shutil.which("ffmpeg"))
+else:
+    print("installing ffmpeg with apt ...")
+    env = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+    subprocess.run(["apt-get", "update", "-qq"], env=env, capture_output=True)
+    installed = subprocess.run(
+        ["apt-get", "install", "-y", "-qq", "ffmpeg"],
+        env=env,
+        check=False,
+        capture_output=True,
+    )
+    if shutil.which("ffmpeg"):
+        step_ok("ffmpeg installed")
+    else:
+        step_fail(
+            "apt-get install ffmpeg",
+            "ffmpeg is still missing; open a terminal cell and run "
+            "'apt-get update && apt-get install -y ffmpeg' to see the real error",
+        )
+
+banner("STEP 4/6 - Internet Archive credentials")
+try:
+    from kaggle_secrets import UserSecretsClient
+
+    secrets = UserSecretsClient()
+    os.environ["IA_ACCESS_KEY"] = secrets.get_secret("IA_ACCESS_KEY")
+    os.environ["IA_SECRET_KEY"] = secrets.get_secret("IA_SECRET_KEY")
+    step_ok("IA keys loaded from Kaggle Secrets")
+except Exception as exc:  # noqa: BLE001
+    if LITERAL_IA_ACCESS_KEY and LITERAL_IA_SECRET_KEY:
+        os.environ["IA_ACCESS_KEY"] = LITERAL_IA_ACCESS_KEY
+        os.environ["IA_SECRET_KEY"] = LITERAL_IA_SECRET_KEY
+        step_ok("IA keys loaded from the literal fallback block in this cell")
+    else:
+        print()
+        step_fail(
+            "load Secrets",
+            f"{exc}. Add the two secrets in the notebook's Add-ons panel "
+            "(names exactly IA_ACCESS_KEY and IA_SECRET_KEY), or paste them into "
+            "LITERAL_IA_* at the top of this cell, then run again.",
+        )
+        raise SystemExit(1)
+
+banner("STEP 5/6 - resume last session state if available")
+print(show_state("state before this session"))
+if STATE_DB.exists():
+    step_ok("local state already exists", str(STATE_DB))
+else:
+    previous = sorted(
+        glob.glob("/kaggle/input/**/plainbagel-work/state/archive.sqlite3", recursive=True)
+        + glob.glob("/kaggle/input/**/archive.sqlite3", recursive=True)
+    )
+    if previous:
+        WORK.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(
+            pathlib.Path(previous[0]).parent.parent,
+            WORK,
+            dirs_exist_ok=True,
+        )
+        step_ok("restored previous session state from", previous[0])
+    else:
+        print("no previous state; starting fresh")
+
+banner("STEP 6/6 - doctor then run")
+WORK.mkdir(parents=True, exist_ok=True)
+
+
+def find_cookie_files(base: str) -> list[str]:
+    """Find Netscape cookie .txt files under base, whatever their filename is."""
+    hits: list[str] = []
+    for root, _dirs, names in os.walk(base):
+        for name in names:
+            if "cookie" not in name.lower() or not name.lower().endswith(".txt"):
+                continue
+            path = os.path.join(root, name)
+            try:
+                with open(path, "rb") as handle:
+                    if not handle.read(64).lstrip().startswith(b"#"):
+                        continue
+            except OSError:
+                continue
+            hits.append(path)
+    return sorted(hits)
+
+
+cookie_files = find_cookie_files("/kaggle/input")
+cookie_args: list[str] = []
+if cookie_files:
+    print("cookie file(s) present:", ", ".join(os.path.basename(p) for p in cookie_files))
+    cookie_args = ["--cookies", cookie_files[0]]
+    step_ok("using YouTube cookies file automatically", cookie_files[0])
+else:
+    print("no Netscape .txt cookie file under /kaggle/input; anonymous sessions will be used")
+    loose = sorted(
+        os.path.join(root, name)
+        for root, _dirs, fs in os.walk("/kaggle/input")
+        for name in fs
+        if "cookie" in name.lower()
+    )
+    if loose:
+        print("  files that look like cookies but are not Netscape .txt:",
+              ", ".join(os.path.basename(p) for p in loose))
+
+desired_clients = os.environ.get("PB_CLIENTS", "").strip()
+if not desired_clients and cookie_args:
+    # with valid cookies the widest compatible client set is safest for media downloads
+    desired_clients = "youtube:player_client=default,web,web_safari,tv,tv_simply"
+if desired_clients:
+    config_path = PROJECT / "config.toml"
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    patched = False
+    for index, line in enumerate(lines):
+        if line.strip().startswith("ytdlp_extractor_args"):
+            lines[index] = f'ytdlp_extractor_args = "{desired_clients}"'
+            patched = True
+            break
+    if patched:
+        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        step_ok("yt-dlp clients:", desired_clients)
+    else:
+        step_fail(
+            "yt-dlp clients override",
+            "config.toml in the delivered zip has no ytdlp_extractor_args key; "
+            "upload the newest plainbagel-archiver.zip as a new dataset version",
+        )
+
+session_minutes = os.environ.get("PB_SESSION_MINUTES", "").strip() or "660"
+
+
+def archiver(*args, capture=False):
+    command = [
+        sys.executable,
+        "-m",
+        "plainbagel_archiver",
+        "--config",
+        str(PROJECT / "config.toml"),
+        "--work-dir",
+        str(WORK),
+        *args,
+    ]
+    print("$", " ".join(command))
+    if capture:
+        return subprocess.run(command, capture_output=True, text=True, check=False)
+    return subprocess.run(command, check=False)
+
+
+doctor = archiver("doctor")
+if doctor.returncode != 0:
+    step_fail("doctor", f"exit {doctor.returncode}; fix the problem above before continuing")
+    raise SystemExit(1)
+
+pb_limit = os.environ.get("PB_LIMIT", "").strip()
+if not pb_limit:
+    if STATE_DB.exists():
+        try:
+            con = sqlite3.connect(STATE_DB)
+            done = con.execute(
+                "select count(*) from videos where status='complete'"
+            ).fetchone()[0]
+            con.close()
+        except sqlite3.Error:
+            done = 0
+    else:
+        done = 0
+    pb_limit = "" if done > 0 else "5"
+limit_args: list[str] = []
+if pb_limit:
+    limit_args = ["--limit", pb_limit]
+    print(f"this session: processing up to {pb_limit} video(s)")
+else:
+    print("existing progress detected; running full batch until the session budget")
+print(f"session budget: {session_minutes} minutes")
+
+run = archiver(
+    "run",
+    "--reconcile",
+    "--session-minutes",
+    session_minutes,
+    *cookie_args,
+    *limit_args,
+)
+if run.returncode != 0:
+    step_fail(
+        "run",
+        f"exit {run.returncode}. Common causes: YouTube bot wall, disk full, or "
+        "IA rate limit; re-run the cell once the issue is handled.",
+    )
+
+banner("session results")
+print(show_state("state after this session"))
+
+banner("WHAT TO DO NEXT")
+if run.returncode == 0:
+    print("1. Click 'Save Version' so /kaggle/working/plainbagel-work is stored in output.")
+    print("2. Next session: rerun this cell; it auto-restores state from the last output.")
+    print("3. Once enough items exist, ask archive.org for a dedicated collection.")
+else:
+    print("If this session hit the YouTube bot wall (videos failed with 'Sign in to "
+          "confirm you're not a bot' or 'HTTP Error 403: Forbidden'):")
+    print("  a. made a throwaway Google account?  log into youtube.com ONLY in that account")
+    print("  b. install the 'Get cookies.txt LOCALLY' Chrome/Firefox extension")
+    print("  c. in an INCOGNITO window, log into youtube.com with that throwaway account, "
+          "visit https://www.youtube.com/robots.txt, then export youtube.com cookies "
+          "with the extension")
+    print("  d. upload the file AS-IS into your Kaggle dataset "
+          "(https://www.kaggle.com/datasets/nekomeowfm/plainbagel-archiver, 'New version'), "
+          "and refresh the notebook's input panel to pick up the new version")
+    print("  e. re-run this cell; it will pick up the cookie file automatically")
+    print("If instead every failure says SpeedDown/429 from archive.org, decrease "
+          "PB_SESSION_MINUTES or wait a while, then re-run.")
+    print("If a later rerun reports that failed records are past their attempt limit, run "
+          "this in a separate cell once cookies are working:")
+    print("  !python3 -m plainbagel_archiver --config /kaggle/working/arch-yt/config.toml "
+          "--work-dir /kaggle/working/plainbagel-work reset-failed")
+print("project:", PROJECT)
+print("workDir:", WORK)
